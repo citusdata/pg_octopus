@@ -530,7 +530,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 		{
 			if (healthCheck->numTries >= HealthCheckMaxRetries + 1)
 			{
-				if (nodeHealth->healthStatus == 1)
+				if (nodeHealth->healthStatus != 0)
 				{
 					elog(LOG, "marking node %s:%d as unhealthy",
 							  nodeHealth->nodeName,
@@ -617,7 +617,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 			{
 				PQfinish(connection);
 
-				if (nodeHealth->healthStatus == 0)
+				if (nodeHealth->healthStatus != 1)
 				{
 					elog(LOG, "marking node %s:%d as healthy",
 							  nodeHealth->nodeName,

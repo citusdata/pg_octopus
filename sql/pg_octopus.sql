@@ -6,6 +6,6 @@ CREATE SCHEMA octopus
 	CREATE TABLE nodes (
 		node_name text not null,
 		node_port integer not null,
-		health_status integer default 0,
+		health_status integer default -1,
 		PRIMARY KEY(node_name, node_port)
 	);
