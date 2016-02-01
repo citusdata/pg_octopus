@@ -11,7 +11,10 @@
 
 #include "postgres.h"
 
-/* These are always necessary for a bgworker */
+/* these are internal headers */
+#include "health_check_metadata.h"
+
+/* these are always necessary for a bgworker */
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -21,25 +24,17 @@
 #include "storage/shmem.h"
 
 /* these headers are used by this particular worker's code */
-#include "access/xact.h"
-#include "executor/spi.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
-#include "pgstat.h"
 #include "sys/time.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
-#include "utils/snapmgr.h"
 #include "tcop/utility.h"
 
 #define CONN_INFO_TEMPLATE "host=%s port=%u dbname=%s connect_timeout=%u"
 #define MAX_CONN_INFO_SIZE 1024
-
-#define TLIST_NUM_NODE_NAME 1
-#define TLIST_NUM_NODE_PORT 2
-#define TLIST_NUM_HEALTH_STATUS 3
 
 
 typedef enum
@@ -51,14 +46,6 @@ typedef enum
 	HEALTH_CHECK_DEAD = 4
 	
 } HealthCheckState;
-
-typedef struct NodeHealth
-{
-	char *nodeName;
-	int nodePort;
-	int healthStatus;
-
-} NodeHealth;
 
 typedef struct HealthCheck
 {
@@ -73,9 +60,6 @@ typedef struct HealthCheck
 
 void _PG_init(void);
 static void PgOctopusWorkerMain(Datum arg);
-static List * LoadNodeHealthList(void);
-static NodeHealth * TupleToNodeHealth(HeapTuple heapTuple,
-												TupleDesc tupleDescriptor);
 static List * CreateHealthChecks(List *nodeHealthList);
 static HealthCheck * CreateHealthCheck(NodeHealth *nodeHealth);
 static void DoHealthChecks(List *healthCheckList);
@@ -85,9 +69,6 @@ static int CompareTimes(struct timeval *leftTime, struct timeval *rightTime);
 static struct timeval SubtractTimes(struct timeval base, struct timeval subtract);
 static struct timeval AddTimeMillis(struct timeval base, uint32 additionalMs);
 static void LatchWait(struct timeval timeout);
-static void SetHealth(char *nodeName, uint16 nodePort, int healthStatus);
-static void StartSPITransaction(void);
-static void EndSPITransaction(void);
 
 
 PG_MODULE_MAGIC;
@@ -260,76 +241,6 @@ PgOctopusWorkerMain(Datum arg)
 	elog(LOG, "pg_octopus monitor exiting");
 
 	proc_exit(0);
-}
-
-
-/*
- * LoadNodeHealthList loads a list of nodes of which to check the health.
- */
-static List *
-LoadNodeHealthList(void)
-{
-	List *nodeHealthList = NIL;
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
-	StringInfoData query;
-
-	MemoryContext upperContext = CurrentMemoryContext, oldContext = NULL;
-
-	StartSPITransaction();
-
-	initStringInfo(&query);
-	appendStringInfo(&query,
-					 "SELECT node_name, node_port, health_status "
-					 "FROM octopus.nodes");
-
-	pgstat_report_activity(STATE_RUNNING, query.data);
-
-	spiStatus = SPI_execute(query.data, false, 0);
-	Assert(spiStatus == SPI_OK_SELECT);
-
-	oldContext = MemoryContextSwitchTo(upperContext);
-
-	for (uint32 rowNumber = 0; rowNumber < SPI_processed; rowNumber++)
-	{
-		HeapTuple heapTuple = SPI_tuptable->vals[rowNumber];
-		NodeHealth *nodeHealth = TupleToNodeHealth(heapTuple,
-																  SPI_tuptable->tupdesc);
-		nodeHealthList = lappend(nodeHealthList, nodeHealth);
-	}
-
-	MemoryContextSwitchTo(oldContext);
-
-	pgstat_report_activity(STATE_IDLE, NULL);
-
-	EndSPITransaction();
-
-	return nodeHealthList;
-}
-
-
-/*
- * TupleToNodeHealth constructs a node health description from a heap tuple obtained
- * via SPI.
- */
-static NodeHealth *
-TupleToNodeHealth(HeapTuple heapTuple, TupleDesc tupleDescriptor)
-{
-	NodeHealth *nodeHealth = NULL;
-	bool isNull = false;
-
-	Datum nodeNameDatum = SPI_getbinval(heapTuple, tupleDescriptor,
-										TLIST_NUM_NODE_NAME, &isNull);
-	Datum nodePortDatum = SPI_getbinval(heapTuple, tupleDescriptor,
-										TLIST_NUM_NODE_PORT, &isNull);
-	Datum healthStatusDatum = SPI_getbinval(heapTuple, tupleDescriptor,
-											TLIST_NUM_HEALTH_STATUS, &isNull);
-
-	nodeHealth = palloc0(sizeof(NodeHealth));
-	nodeHealth->nodeName = TextDatumGetCString(nodeNameDatum);
-	nodeHealth->nodePort = DatumGetInt32(nodePortDatum);
-	nodeHealth->healthStatus = DatumGetInt32(healthStatusDatum);
-
-	return nodeHealth;
 }
 
 
@@ -541,15 +452,15 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 		{
 			if (healthCheck->numTries >= HealthCheckMaxRetries + 1)
 			{
-				if (nodeHealth->healthStatus != 0)
+				if (nodeHealth->healthState != NODE_HEALTH_BAD)
 				{
 					elog(LOG, "marking node %s:%d as unhealthy",
 							  nodeHealth->nodeName,
 							  nodeHealth->nodePort);
 
-					SetHealth(healthCheck->node->nodeName,
-							  healthCheck->node->nodePort,
-							  0);
+					SetNodeHealthState(healthCheck->node->nodeName,
+									   healthCheck->node->nodePort,
+									   NODE_HEALTH_BAD);
 				}
 
 				healthCheck->state = HEALTH_CHECK_DEAD;
@@ -628,15 +539,15 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 			{
 				PQfinish(connection);
 
-				if (nodeHealth->healthStatus != 1)
+				if (nodeHealth->healthState != NODE_HEALTH_GOOD)
 				{
 					elog(LOG, "marking node %s:%d as healthy",
 							  nodeHealth->nodeName,
 							  nodeHealth->nodePort);
 
-					SetHealth(healthCheck->node->nodeName,
-							  healthCheck->node->nodePort,
-							  1);
+					SetNodeHealthState(healthCheck->node->nodeName,
+									   healthCheck->node->nodePort,
+									   NODE_HEALTH_GOOD);
 				}
 
 				healthCheck->connection = NULL;
@@ -750,58 +661,3 @@ AddTimeMillis(struct timeval base, uint32 additionalMs)
 	return result;
 }
 
-
-/*
- * SetHealth updates the health status of a node.
- */
-static void
-SetHealth(char *nodeName, uint16 nodePort, int healthStatus)
-{
-	StringInfoData query;
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
-
-	StartSPITransaction();
-
-	initStringInfo(&query);
-	appendStringInfo(&query,
-					 "UPDATE octopus.nodes "
-					 "SET health_status = %d "
-					 "WHERE node_name = '%s' AND node_port = %d",
-					 healthStatus,
-					 nodeName,
-					 nodePort);
-
-	pgstat_report_activity(STATE_RUNNING, query.data);
-
-	spiStatus = SPI_execute(query.data, false, 0);
-	Assert(spiStatus == SPI_OK_UPDATE);
-
-	pgstat_report_activity(STATE_IDLE, NULL);
-
-	EndSPITransaction();
-}
-
-
-/*
- * StartSPITransaction starts a transaction using SPI.
- */
-static void
-StartSPITransaction(void)
-{
-	SetCurrentStatementStartTimestamp();
-	StartTransactionCommand();
-	SPI_connect();
-	PushActiveSnapshot(GetTransactionSnapshot());
-}
-
-
-/*
- * EndSPITransaction finishes a transaction that was started using SPI.
- */
-static void
-EndSPITransaction(void)
-{
-	SPI_finish();
-	PopActiveSnapshot();
-	CommitTransactionCommand();
-}
