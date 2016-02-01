@@ -52,6 +52,8 @@ typedef struct HealthCheck
 	NodeHealth *node;
 	HealthCheckState state;
 	PGconn *connection;
+	bool readyToPoll;
+	PostgresPollingStatusType pollingStatus;
 	int numTries;
 	struct timeval nextEventTime;
 
@@ -216,6 +218,7 @@ PgOctopusWorkerMain(Datum arg)
 		roundEndTime = AddTimeMillis(currentTime, HealthCheckPeriod);
 
 		nodeHealthList = LoadNodeHealthList();
+
 		healthCheckList = CreateHealthChecks(nodeHealthList);
 
 		DoHealthChecks(healthCheckList);
@@ -364,15 +367,14 @@ WaitForEvent(List *healthCheckList)
 		{
 			PGconn *connection = healthCheck->connection;
 			int connectionFileDescriptor = PQsocket(connection);
-			PostgresPollingStatusType pollingStatus = PQconnectPoll(connection);
 
 			FD_SET(connectionFileDescriptor, &exceptionFileDescriptorSet);
 			
-			if (pollingStatus == PGRES_POLLING_READING)
+			if (healthCheck->pollingStatus == PGRES_POLLING_READING)
 			{
 				FD_SET(connectionFileDescriptor, &readFileDescriptorSet);
 			}
-			else if (pollingStatus == PGRES_POLLING_WRITING)
+			else if (healthCheck->pollingStatus == PGRES_POLLING_WRITING)
 			{
 				FD_SET(connectionFileDescriptor, &writeFileDescriptorSet);
 			}
@@ -398,6 +400,20 @@ WaitForEvent(List *healthCheckList)
 		if (selectResult < 0 && errno != EINTR && errno != EWOULDBLOCK)
 		{
 			return STATUS_ERROR;
+		}
+
+		foreach(healthCheckCell, healthCheckList)
+		{
+			HealthCheck *healthCheck = (HealthCheck *) lfirst(healthCheckCell);
+			PGconn *connection = healthCheck->connection;
+			int connectionFileDescriptor = PQsocket(connection);
+			bool readyToPoll = false;
+
+			readyToPoll = FD_ISSET(connectionFileDescriptor, &readFileDescriptorSet) ||
+						  FD_ISSET(connectionFileDescriptor, &writeFileDescriptorSet) ||
+						  FD_ISSET(connectionFileDescriptor, &exceptionFileDescriptorSet);
+
+			healthCheck->readyToPoll = readyToPoll;
 		}
 	}
 	else
@@ -499,6 +515,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 
 				healthCheck->nextEventTime = nextTryTime;
 				healthCheck->connection = NULL;
+				healthCheck->pollingStatus = PGRES_POLLING_FAILED;
 				healthCheck->state = HEALTH_CHECK_RETRY;
 			}
 			else
@@ -509,6 +526,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 
 				healthCheck->nextEventTime = timeoutTime;
 				healthCheck->connection = connection;
+				healthCheck->pollingStatus = PGRES_POLLING_WRITING;
 				healthCheck->state = HEALTH_CHECK_CONNECTING;
 			}
 
@@ -520,10 +538,30 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 		case HEALTH_CHECK_CONNECTING:
 		{
 			PGconn *connection = healthCheck->connection;
+			PostgresPollingStatusType pollingStatus = PGRES_POLLING_FAILED;
 
-			PostgresPollingStatusType pollingStatus = PQconnectPoll(connection);
-			if (pollingStatus == PGRES_POLLING_FAILED ||
-				CompareTimes(&healthCheck->nextEventTime, &currentTime) < 0)
+			if (CompareTimes(&healthCheck->nextEventTime, &currentTime) < 0)
+			{
+				struct timeval nextTryTime = {0, 0};
+
+				PQfinish(connection);
+
+				nextTryTime = AddTimeMillis(currentTime, HealthCheckRetryDelay);
+
+				healthCheck->nextEventTime = nextTryTime;
+				healthCheck->connection = NULL;
+				healthCheck->pollingStatus = pollingStatus;
+				healthCheck->state = HEALTH_CHECK_RETRY;
+				break;
+			}
+
+			if (!healthCheck->readyToPoll)
+			{
+				break;
+			}
+
+			pollingStatus = PQconnectPoll(connection);
+			if (pollingStatus == PGRES_POLLING_FAILED)
 			{
 				struct timeval nextTryTime = {0, 0};
 
@@ -558,6 +596,8 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 			{
 				/* Health check is still connecting */
 			}
+
+			healthCheck->pollingStatus = pollingStatus;
 
 			break;
 		}

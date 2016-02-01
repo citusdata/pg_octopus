@@ -120,9 +120,9 @@ SetNodeHealthState(char *nodeName, uint16 nodePort, int healthState)
 	appendStringInfo(&query,
 					 "UPDATE octopus.nodes "
 					 "SET health_status = %d "
-					 "WHERE node_name = '%s' AND node_port = %d",
+					 "WHERE node_name = %s AND node_port = %d",
 					 healthState,
-					 quote_identifier(nodeName),
+					 quote_literal_cstr(nodeName),
 					 nodePort);
 
 	pgstat_report_activity(STATE_RUNNING, query.data);
