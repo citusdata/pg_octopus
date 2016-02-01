@@ -11,7 +11,7 @@ The easiest way to install pg_octopus is to build the sources from GitHub.
     PATH=/usr/local/pgsql/bin/:$PATH make
     sudo PATH=/usr/local/pgsql/bin/:$PATH make install
 
-After installing the extension, run:
+After installing the extension, run the following in psql:
 
     CREATE EXTENSION pg_octopus;
     
