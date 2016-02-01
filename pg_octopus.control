@@ -1,0 +1,4 @@
+comment = 'Background health checker'
+default_version = '0.1'
+module_pathname = '$libdir/pg_octopus'
+relocatable = true

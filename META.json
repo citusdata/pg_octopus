@@ -1,0 +1,49 @@
+{
+    "name": "pg_octopus",
+    "abstract": "Health checker for PostgreSQL",
+    "description": "Sets up a background worker that continuously checks the health of a cluster",
+    "version": "0.1",
+    "maintainer": "\"Marco Slot\" <marco@citusdata.com>",
+    "license": {
+		"PostgreSQL": "http://www.postgresql.org/about/licence"
+	},
+    "prereqs": {
+       "runtime": {
+          "requires": {
+             "PostgreSQL": "9.3.4"
+          }
+       }
+    },
+    "provides": {
+        "pg_octopus": {
+            "abstract": "Paxos functions for PostgreSQL",
+            "file": "sql/pg_octopus--0.1.sql",
+            "docfile": "README.md",
+            "version": "0.1"
+        }
+    },
+    "release_status": "stable",
+    "resources": {
+        "homepage": "https://citusdata.com/",
+        "bugtracker": {
+            "web": "https://github.com/marcocitus/pg_octopus/issues",
+            "mailto": "support@citusdata.com"
+        },
+        "repository": {
+          "url":  "git://github.com/marcocitus/pg_octopus.git",
+          "web":  "https://github.com/marcocitus/pg_octopus",
+          "type": "git"
+        }
+    },
+
+    "generated_by": "\"Marco Slot\" <marco@citusdata.com>",
+
+    "tags": [
+        "cluster"
+    ],
+
+    "meta-spec": {
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
+    }
+}
