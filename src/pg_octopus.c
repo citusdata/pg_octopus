@@ -690,6 +690,9 @@ CompareTimes(struct timeval *leftTime, struct timeval *rightTime)
 /*
  * SubtractTimes subtract the ‘struct timeval’ values y from x,
  * returning the result.
+ *
+ * From:
+ * http://www.gnu.org/software/libc/manual/html_node/Elapsed-Time.html
  */
 static struct timeval
 SubtractTimes(struct timeval x, struct timeval y)
