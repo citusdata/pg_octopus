@@ -124,6 +124,12 @@ _PG_init(void)
 							NULL, &HealthCheckMaxRetries, 2, 1, 100, PGC_SIGHUP,
 							0, NULL, NULL, NULL);
 
+	DefineCustomIntVariable("pg_octopus.health_check_retry_delay",
+							"Delay between consecutive retries.",
+							NULL, &HealthCheckRetryDelay, 1000, 1, INT_MAX, PGC_SIGHUP,
+							0, NULL, NULL, NULL);
+
+
 	/* set up common data for all our workers */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
