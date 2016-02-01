@@ -1,3 +1,14 @@
+/*-------------------------------------------------------------------------
+ *
+ * src/pg_octopus.c
+ *
+ * Implementation of the pg_octopus health checker.
+ *
+ * Copyright (c) 2016, Citus Data, Inc.
+ *
+ *-------------------------------------------------------------------------
+ */
+
 #include "postgres.h"
 
 /* These are always necessary for a bgworker */
