@@ -470,7 +470,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 			{
 				if (nodeHealth->healthState != NODE_HEALTH_BAD)
 				{
-					elog(LOG, "marking node %s:%d as unhealthy",
+					elog(LOG, "pg_octopus marking node %s:%d as unhealthy",
 							  nodeHealth->nodeName,
 							  nodeHealth->nodePort);
 
@@ -579,7 +579,7 @@ ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime)
 
 				if (nodeHealth->healthState != NODE_HEALTH_GOOD)
 				{
-					elog(LOG, "marking node %s:%d as healthy",
+					elog(LOG, "pg_octopus marking node %s:%d as healthy",
 							  nodeHealth->nodeName,
 							  nodeHealth->nodePort);
 
