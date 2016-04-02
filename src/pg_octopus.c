@@ -124,6 +124,10 @@ _PG_init(void)
 							NULL, &HealthCheckRetryDelay, 1000, 1, INT_MAX, PGC_SIGHUP,
 							0, NULL, NULL, NULL);
 
+    DefineCustomStringVariable("pg_octopus.nodes_table",
+                               "Table in which to update health check statuses.",
+                               NULL, &HealthCheckNodesTable, "octopus.nodes", PGC_SIGHUP,
+                               0, NULL, NULL, NULL);
 
 	/* set up common data for all our workers */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;

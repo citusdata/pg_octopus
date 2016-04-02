@@ -35,6 +35,9 @@ static void StartSPITransaction(void);
 static void EndSPITransaction(void);
 
 
+char *HealthCheckNodesTable = "octopus.nodes";
+
+
 /*
  * LoadNodeHealthList loads a list of nodes of which to check the health.
  */
@@ -52,7 +55,8 @@ LoadNodeHealthList(void)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT node_name, node_port, health_status "
-					 "FROM octopus.nodes");
+					 "FROM %s",
+					 HealthCheckNodesTable);
 
 	pgstat_report_activity(STATE_RUNNING, query.data);
 
@@ -118,9 +122,9 @@ SetNodeHealthState(char *nodeName, uint16 nodePort, int healthState)
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE octopus.nodes "
-					 "SET health_status = %d "
+					 "UPDATE %s SET health_status = %d "
 					 "WHERE node_name = %s AND node_port = %d",
+					 HealthCheckNodesTable,
 					 healthState,
 					 quote_literal_cstr(nodeName),
 					 nodePort);

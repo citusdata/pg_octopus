@@ -44,6 +44,10 @@ typedef struct NodeHealth
 } NodeHealth;
 
 
+/* GUC to change the health checks table */
+extern char *HealthCheckNodesTable;
+
+
 extern List * LoadNodeHealthList(void);
 extern NodeHealth * TupleToNodeHealth(HeapTuple heapTuple,
 												TupleDesc tupleDescriptor);
