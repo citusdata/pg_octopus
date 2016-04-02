@@ -28,6 +28,7 @@
 #include "lib/stringinfo.h"
 #include "libpq-fe.h"
 #include "libpq/pqsignal.h"
+#include "poll.h"
 #include "sys/time.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
@@ -68,9 +69,9 @@ static void DoHealthChecks(List *healthCheckList);
 static void ManageHealthCheck(HealthCheck *healthCheck, struct timeval currentTime);
 static int WaitForEvent(List *healthCheckList);
 static int CompareTimes(struct timeval *leftTime, struct timeval *rightTime);
-static struct timeval SubtractTimes(struct timeval base, struct timeval subtract);
+static int SubtractTimes(struct timeval base, struct timeval subtract);
 static struct timeval AddTimeMillis(struct timeval base, uint32 additionalMs);
-static void LatchWait(struct timeval timeout);
+static void LatchWait(long timeoutMs);
 
 
 PG_MODULE_MAGIC;
@@ -209,7 +210,7 @@ PgOctopusWorkerMain(Datum arg)
 	{
 		struct timeval currentTime = {0, 0};
 		struct timeval roundEndTime = {0, 0};
-		struct timeval timeout = {0, 0};
+		int timeout = 0;
 		List *nodeHealthList = NIL;
 		List *healthCheckList = NIL;
 
@@ -229,7 +230,7 @@ PgOctopusWorkerMain(Datum arg)
 
 		timeout = SubtractTimes(roundEndTime, currentTime);
 
-		if (timeout.tv_sec >= 0 && timeout.tv_usec >= 0)
+		if (timeout >= 0)
 		{
 			LatchWait(timeout);
 		}
@@ -332,23 +333,26 @@ static int
 WaitForEvent(List *healthCheckList)
 {
 	ListCell *healthCheckCell = NULL;
-	fd_set readFileDescriptorSet;
-	fd_set writeFileDescriptorSet;
-	fd_set exceptionFileDescriptorSet;
+	int healthCheckCount = list_length(healthCheckList);
+    struct pollfd *pollFDs = NULL;
 	struct timeval currentTime = {0, 0};
 	struct timeval nextEventTime = {0, 0};
-	struct timeval timeout = {0, 0};
-	int maxFileDescriptor = 0;
+	int healthCheckIndex = 0;
+    int pollResult = 0;
+    int pollTimeout = 0;
+
+    pollFDs = (struct pollfd *) palloc0(healthCheckCount * sizeof(struct pollfd));
 
 	gettimeofday(&currentTime, NULL);
-
-	FD_ZERO(&readFileDescriptorSet);
-	FD_ZERO(&writeFileDescriptorSet);
-	FD_ZERO(&exceptionFileDescriptorSet);
 
 	foreach(healthCheckCell, healthCheckList)
 	{
 		HealthCheck *healthCheck = (HealthCheck *) lfirst(healthCheckCell);
+		struct pollfd *pollFileDescriptor = &pollFDs[healthCheckIndex];
+
+		pollFileDescriptor->fd = -1;
+		pollFileDescriptor->events = 0;
+		pollFileDescriptor->revents = 0;
 
 		if (healthCheck->state == HEALTH_CHECK_CONNECTING ||
 			healthCheck->state == HEALTH_CHECK_RETRY)
@@ -366,59 +370,42 @@ WaitForEvent(List *healthCheckList)
 		if (healthCheck->state == HEALTH_CHECK_CONNECTING)
 		{
 			PGconn *connection = healthCheck->connection;
-			int connectionFileDescriptor = PQsocket(connection);
+			int pollEventMask = 0;
 
-			FD_SET(connectionFileDescriptor, &exceptionFileDescriptorSet);
-			
 			if (healthCheck->pollingStatus == PGRES_POLLING_READING)
 			{
-				FD_SET(connectionFileDescriptor, &readFileDescriptorSet);
+				pollEventMask = POLLERR | POLLIN;
 			}
 			else if (healthCheck->pollingStatus == PGRES_POLLING_WRITING)
 			{
-				FD_SET(connectionFileDescriptor, &writeFileDescriptorSet);
+				pollEventMask = POLLERR | POLLOUT;
 			}
 
-			maxFileDescriptor = Max(maxFileDescriptor, connectionFileDescriptor);
+			pollFileDescriptor->fd = PQsocket(connection);
+			pollFileDescriptor->events = pollEventMask;
 		}
+
+		healthCheckIndex++;
 	}
 
-	timeout = SubtractTimes(nextEventTime, currentTime);
+    pollTimeout = SubtractTimes(nextEventTime, currentTime);
+    pollResult = poll(pollFDs, healthCheckCount, pollTimeout);
 
-	if (maxFileDescriptor >= 0)
+    if (pollResult < 0)
+    {
+        return STATUS_ERROR;
+    }
+
+	healthCheckIndex = 0;
+
+	foreach(healthCheckCell, healthCheckList)
 	{
-		int selectResult = 0;
+		HealthCheck *healthCheck = (HealthCheck *) lfirst(healthCheckCell);
+        struct pollfd *pollFileDescriptor = &pollFDs[healthCheckIndex];
 
-		PG_SETMASK(&UnBlockSig);
+        healthCheck->readyToPoll = pollFileDescriptor->revents & pollFileDescriptor->events;
 
-		selectResult = select(maxFileDescriptor + 1, &readFileDescriptorSet,
-							  &writeFileDescriptorSet, &exceptionFileDescriptorSet,
-							  &timeout);
-
-		PG_SETMASK(&BlockSig);
-
-		if (selectResult < 0 && errno != EINTR && errno != EWOULDBLOCK)
-		{
-			return STATUS_ERROR;
-		}
-
-		foreach(healthCheckCell, healthCheckList)
-		{
-			HealthCheck *healthCheck = (HealthCheck *) lfirst(healthCheckCell);
-			PGconn *connection = healthCheck->connection;
-			int connectionFileDescriptor = PQsocket(connection);
-			bool readyToPoll = false;
-
-			readyToPoll = FD_ISSET(connectionFileDescriptor, &readFileDescriptorSet) ||
-						  FD_ISSET(connectionFileDescriptor, &writeFileDescriptorSet) ||
-						  FD_ISSET(connectionFileDescriptor, &exceptionFileDescriptorSet);
-
-			healthCheck->readyToPoll = readyToPoll;
-		}
-	}
-	else
-	{
-		LatchWait(timeout);
+        healthCheckIndex++;
 	}
 
 	return 0;
@@ -429,10 +416,9 @@ WaitForEvent(List *healthCheckList)
  * LatchWait sleeps on the process latch until a timeout occurs.
  */
 static void
-LatchWait(struct timeval timeout)
+LatchWait(long timeoutMs)
 {
 	int waitResult = 0;
-	long timeoutMs = timeout.tv_sec * 1000 + timeout.tv_usec / 1000;
 
 	/*
 	 * Background workers mustn't call usleep() or any direct equivalent:
@@ -656,10 +642,10 @@ CompareTimes(struct timeval *leftTime, struct timeval *rightTime)
  * From:
  * http://www.gnu.org/software/libc/manual/html_node/Elapsed-Time.html
  */
-static struct timeval
+static int
 SubtractTimes(struct timeval x, struct timeval y)
 {
-	struct timeval result = {0, 0};
+	int differenceMs = 0;
 
 	/* Perform the carry for the later subtraction by updating y. */
 	if (x.tv_usec < y.tv_usec)
@@ -676,14 +662,10 @@ SubtractTimes(struct timeval x, struct timeval y)
 		y.tv_sec -= nsec;
 	}
 
-	/*
-	 * Compute the time remaining to wait.
-	 * tv_usec is certainly positive.
-	 */
-	result.tv_sec = x.tv_sec - y.tv_sec;
-	result.tv_usec = x.tv_usec - y.tv_usec;
+    differenceMs += 1000 * (x.tv_sec - y.tv_sec);
+    differenceMs += (x.tv_usec - y.tv_usec) / 1000;
 
-	return result;
+	return differenceMs;
 }
 
 
